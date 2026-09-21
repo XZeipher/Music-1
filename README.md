@@ -1,9 +1,11 @@
 # Music Search API
 
-A FastAPI service that searches for a song on Spotify (without any Spotify
-credentials), finds the best-matching YouTube video for it, and returns a
-single clean JSON payload. It's deployable directly to Vercel as a
-serverless Python function.
+A FastAPI service that looks up a song on YouTube Music, finds the
+best-matching YouTube video for it, and returns a single clean JSON payload.
+It's deployable directly to Vercel as a serverless Python function.
+
+**No API keys, no accounts, no environment variables** — everything goes
+through [`ytmusicapi`](https://github.com/sigma67/ytmusicapi).
 
 ## 1. What the API does
 
@@ -12,21 +14,22 @@ GET /api/search?q=Blinding%20Lights
 ```
 
 1. Takes your search query (`q`).
-2. Searches Spotify's catalog using **SpotAPI** — a reverse-engineered
-   wrapper around Spotify's own internal ("partner") API. No Client ID,
-   Client Secret, OAuth flow, or Spotify account is required.
-3. Normalizes the top Spotify result into title / artist / album / artwork
-   / duration / Spotify URL.
-4. Searches YouTube (official YouTube Data API v3) for
+2. Searches YouTube Music's **songs** catalog using **ytmusicapi** — an
+   unofficial wrapper around the same internal API that music.youtube.com
+   uses. No API key, OAuth flow, or Google account is required.
+3. Normalizes the top result into title / artist / album / artwork /
+   duration / YouTube Music URL.
+4. Searches YouTube **videos** (also via ytmusicapi) for
    `"<track title> <artist>"`.
-5. Scores every YouTube result with a deterministic matching algorithm and
-   picks the best one.
-6. Calls a placeholder `extract_audio(video_id)` function (currently
-   unimplemented — see [section 11](#11-current-extractor-limitation)).
-7. Returns everything as JSON.
+5. Adds the track's own official audio upload to the candidate list (so there
+   is always at least one candidate).
+6. Scores every candidate with a deterministic matching algorithm and picks
+   the best one.
+7. Calls a placeholder `extract_audio(video_id)` function (currently
+   unimplemented — see [section 10](#10-current-extractor-limitation)).
+8. Returns everything as JSON.
 
-No official Spotify SDK, no database, no Redis — the only external
-credential this project needs is a YouTube Data API key.
+No Spotify, no YouTube Data API, no database, no Redis.
 
 ## 2. Architecture
 
@@ -36,9 +39,9 @@ Client
   ▼
 api/index.py  (FastAPI app, Vercel entrypoint)
   │
-  ├─► services/spotify.py   → SpotAPI (Song.query_songs) → NormalizedTrack
+  ├─► services/ytmusic.py   → ytmusicapi (search, filter="songs")  → NormalizedTrack
   │
-  ├─► services/youtube.py   → YouTube Data API v3 → list[YouTubeCandidate]
+  ├─► services/youtube.py   → ytmusicapi (search, filter="videos") → list[YouTubeCandidate]
   │
   ├─► services/matcher.py   → deterministic scoring → best MatchResult
   │
@@ -46,9 +49,9 @@ api/index.py  (FastAPI app, Vercel entrypoint)
 ```
 
 Each service module is self-contained and only exposes a small, stable
-function/interface to the rest of the app. If SpotAPI's internal schema
-changes, or you swap the audio extractor for a real implementation, you
-only touch that one file.
+function/interface to the rest of the app. If ytmusicapi's output changes, or
+you swap the audio extractor for a real implementation, you only touch that
+one file.
 
 ## 3. Project structure
 
@@ -57,71 +60,43 @@ music-api/
 ├── api/
 │   └── index.py          # FastAPI app + Vercel entrypoint
 ├── services/
-│   ├── spotify.py         # SpotAPI wrapper → NormalizedTrack
-│   ├── youtube.py         # YouTube Data API v3 wrapper
-│   ├── matcher.py         # Spotify ↔ YouTube matching/scoring
+│   ├── ytmusic.py         # ytmusicapi client + song lookup → NormalizedTrack
+│   ├── youtube.py         # ytmusicapi video search → YouTubeCandidate
+│   ├── matcher.py         # track ↔ video matching/scoring
 │   └── extractor.py       # extract_audio() placeholder (unimplemented)
 ├── requirements.txt
 ├── vercel.json
-├── .env.example
 ├── .gitignore
 └── README.md
 ```
 
-## 4. SpotAPI dependency
+## 4. ytmusicapi dependency
 
-This project uses [`spotapi`](https://github.com/Aran404/SpotAPI)
-(the `Aran404/SpotAPI` project, imported as `from spotapi import Song`),
-**not** Spotify's official Web API and **not** `spotipy`.
+This project uses [`ytmusicapi`](https://github.com/sigma67/ytmusicapi)
+(`from ytmusicapi import YTMusic`), unauthenticated.
 
-- `Song().query_songs(query, limit=...)` returns Spotify's raw internal
-  search response (`data.searchV2.tracksV2.items[...].item.data`).
-- `services/spotify.py` walks that structure defensively (every field
-  access has a fallback) and converts it into our own stable
-  `NormalizedTrack` shape, so the rest of the app never touches SpotAPI's
-  raw response directly.
-- SpotAPI is **undocumented and reverse-engineered**. It can break or
-  change shape without notice, and Spotify can also change how its
-  internal API responds. If you start seeing 502 errors from
-  `/api/search`, check the [SpotAPI GitHub issues](https://github.com/Aran404/SpotAPI/issues)
-  first — this is a known characteristic of any tool built on Spotify's
-  private endpoints, not a bug specific to this project.
-- No Spotify account, Client ID, Client Secret, or OAuth token is used or
-  required anywhere in this codebase.
+- `services/ytmusic.py` calls `YTMusic().search(query, filter="songs")` and
+  walks the result defensively (every field access has a fallback), turning
+  it into our own stable `NormalizedTrack` shape. The rest of the app never
+  touches a raw ytmusicapi response.
+- `services/youtube.py` calls `YTMusic().search(query, filter="videos")` for
+  candidate videos.
+- ytmusicapi is **synchronous**, so every call runs on a worker thread
+  (`asyncio.to_thread`) with an 8-second timeout, and one `YTMusic` client is
+  reused across requests within a warm serverless instance.
+- ytmusicapi is **unofficial**. It can break or change shape without notice,
+  and YouTube may rate-limit or block requests coming from cloud/datacenter
+  IP addresses. If you start seeing 502 errors from `/api/search`, check the
+  [ytmusicapi issues](https://github.com/sigma67/ytmusicapi/issues) first and
+  try upgrading the package — this is a known characteristic of any tool
+  built on private endpoints, not a bug specific to this project.
+- Requires Python 3.10+ (ytmusicapi's minimum).
 
-## 5. YouTube Data API setup
+## 5. Environment variables
 
-1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
-2. Create a project (or use an existing one).
-3. Enable the **YouTube Data API v3** for that project.
-4. Create an **API key** (Credentials → Create Credentials → API key).
-5. (Recommended) Restrict the key to the YouTube Data API v3 and, if
-   possible, to the server IP(s)/domain(s) that will call it.
-6. Copy the key into your `.env` file as `YOUTUBE_API_KEY`.
+None. Nothing in this project reads a secret or an API key.
 
-The YouTube Data API has a daily quota; a `search.list` call costs 100
-quota units against the default 10,000/day quota, so keep that in mind if
-you expect heavy traffic.
-
-## 6. Environment variable setup
-
-Only one environment variable is required:
-
-```
-YOUTUBE_API_KEY=your-youtube-api-key-here
-```
-
-Copy the example file and fill it in:
-
-```bash
-cp .env.example .env
-```
-
-No `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, or
-`SPOTIFY_ACCESS_TOKEN` variables exist in this project — SpotAPI doesn't
-need them.
-
-## 7. Local installation
+## 6. Local installation
 
 ```bash
 git clone <this-repo>
@@ -129,13 +104,11 @@ cd music-api
 python3 -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env
-# then edit .env and set YOUTUBE_API_KEY
 ```
 
 Requires Python 3.11+.
 
-## 8. Running locally
+## 7. Running locally
 
 ```bash
 uvicorn api.index:app --reload --port 8000
@@ -143,7 +116,7 @@ uvicorn api.index:app --reload --port 8000
 
 The API is now available at `http://localhost:8000`.
 
-## 9. API examples
+## 8. API examples
 
 **Health check**
 
@@ -155,7 +128,7 @@ curl http://localhost:8000/api/health
 { "status": "ok" }
 ```
 
-**Search**
+**Search** (values below are illustrative)
 
 ```bash
 curl "http://localhost:8000/api/search?q=Blinding%20Lights"
@@ -166,26 +139,34 @@ curl "http://localhost:8000/api/search?q=Blinding%20Lights"
   "success": true,
   "query": "Blinding Lights",
   "track": {
-    "id": "0VjIjW4GlUZ8o2W7uezw3p",
+    "id": "<video id of the official audio upload>",
     "title": "Blinding Lights",
     "artist": "The Weeknd",
     "album": "After Hours",
-    "artwork": "https://i.scdn.co/image/ab67616d0000b273...",
-    "duration_ms": 200040,
-    "spotify_url": "https://open.spotify.com/track/0VjIjW4GlUZ8o2W7uezw3p"
+    "artwork": "https://lh3.googleusercontent.com/...=w544-h544-l90-rj",
+    "duration_ms": 200000,
+    "ytmusic_url": "https://music.youtube.com/watch?v=<id>"
   },
   "youtube": {
     "video_id": "4NRXx6U8ABQ",
-    "title": "The Weeknd - Blinding Lights (Official Video)",
+    "title": "Blinding Lights (Official Video)",
     "channel_title": "The Weeknd",
-    "thumbnail": "https://i.ytimg.com/vi/4NRXx6U8ABQ/hqdefault.jpg",
-    "published_at": "2019-11-29T16:00:07Z",
+    "thumbnail": "https://i.ytimg.com/vi/4NRXx6U8ABQ/sddefault.jpg",
+    "published_at": null,
     "youtube_url": "https://www.youtube.com/watch?v=4NRXx6U8ABQ",
     "match_score": 92.5
   },
   "stream": null
 }
 ```
+
+Notes on the fields:
+
+- `track.id` is a YouTube video ID (the track's official audio upload).
+- `youtube.channel_title` is the artist/uploader name(s) YouTube Music shows
+  for the video.
+- `youtube.published_at` is always `null` — ytmusicapi's search results don't
+  include a publish date. The field is kept so existing clients don't break.
 
 **Missing query**
 
@@ -198,38 +179,28 @@ curl "http://localhost:8000/api/search?q="
 ```
 → HTTP 400
 
-**No Spotify result**
+**No matching song**
 
 ```json
 { "success": false, "error": "Track not found" }
 ```
 → HTTP 404
 
-**No YouTube result** (Spotify metadata is still returned)
-
-```json
-{
-  "success": true,
-  "query": "...",
-  "track": { "...": "..." },
-  "youtube": null,
-  "stream": null
-}
-```
-→ HTTP 200
-
-**Upstream failure** (SpotAPI or YouTube unreachable/erroring) → HTTP 502
+**Upstream failure** (YouTube Music unreachable, timing out, or erroring)
+→ HTTP 502, with `"Failed to search YouTube Music"` (song lookup) or
+`"Failed to search YouTube"` (video search).
 
 **Unexpected internal error** → HTTP 500, generic message only — no stack
-traces, credentials, or internals are ever included in a response.
+traces or internals are ever included in a response.
 
-## 10. Vercel deployment
+If the video search returns nothing, the track's own official audio upload is
+used, so `youtube` is populated whenever the song lookup succeeds.
+
+## 9. Vercel deployment
 
 1. Push this project to a Git repository.
 2. Import it into [Vercel](https://vercel.com/new).
-3. In the Vercel project's **Settings → Environment Variables**, add:
-   - `YOUTUBE_API_KEY` = your YouTube Data API v3 key
-4. Deploy.
+3. Deploy. (No environment variables to configure.)
 
 Once deployed:
 
@@ -239,10 +210,9 @@ https://YOUR-DOMAIN.vercel.app/api/search?q=Blinding%20Lights
 ```
 
 `vercel.json` declares `api/index.py` as an ASGI entrypoint (Vercel's
-Python runtime detects the module-level `app` object automatically) and
-routes all `/api/*` requests to it — there is no long-running server
-process, which keeps this compatible with Vercel's serverless execution
-model.
+Python runtime detects the module-level `app` object automatically) —
+there is no long-running server process, which keeps this compatible with
+Vercel's serverless execution model.
 
 ### CORS
 
@@ -260,7 +230,7 @@ with your actual frontend origin(s):
 ALLOWED_ORIGINS = ["https://your-frontend-domain.com"]
 ```
 
-## 11. Current extractor limitation
+## 10. Current extractor limitation
 
 `services/extractor.py` intentionally contains only:
 
@@ -273,18 +243,17 @@ This is **not implemented on purpose**. No YouTube audio-extraction or
 downloading library is installed or used anywhere in this project. As a
 result, `"stream"` in every `/api/search` response is currently `null`.
 
-The rest of the API is fully functional without it — Spotify metadata,
-YouTube matching, and match scoring all work end-to-end. When you have an
-audio source you are authorized to stream from, implement the body of
+The rest of the API is fully functional without it — track metadata, video
+matching, and match scoring all work end-to-end. When you have an audio
+source you are authorized to stream from, implement the body of
 `extract_audio` in `services/extractor.py`; nothing else in the codebase
 needs to change, since `api/index.py` already calls this function and
 passes its return value straight through as `"stream"` in the response.
 
 ## Security notes
 
-- `YOUTUBE_API_KEY` is read only from the environment
-  (`os.environ.get("YOUTUBE_API_KEY")`) inside `services/youtube.py`. It is
-  never included in JSON responses, logs, or exception messages.
+- This project holds no credentials: no API keys, tokens, or secrets are
+  read, stored, logged, or returned.
 - All unexpected errors are caught and converted into a generic
   `{"success": false, "error": "Internal server error"}` response with an
   HTTP 500 status — internal exception details and stack traces are only
