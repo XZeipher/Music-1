@@ -4,11 +4,5 @@
     "api/index.py": {
       "excludeFiles": "{README.md,.env.example,.gitignore}"
     }
-  },
-  "rewrites": [
-    {
-      "source": "/api/(.*)",
-      "destination": "/api/index.py"
-    }
-  ]
+  }
 }
