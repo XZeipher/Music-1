@@ -2,7 +2,7 @@
 services/matcher.py
 
 Deterministic, generic scoring algorithm for picking the YouTube video that
-best matches a given Spotify track. Nothing here is hard-coded for any
+best matches a given track. Nothing here is hard-coded for any
 particular song or artist - every signal is computed from text on hand.
 
 Scoring is on a 0-100 scale (a couple of small bonuses can push slightly
@@ -99,29 +99,29 @@ def _token_overlap_ratio(a_tokens: list[str], b_tokens: list[str]) -> float:
     return matched / len(a_tokens)
 
 
-def _title_similarity_score(spotify_title: str, video_title: str) -> float:
+def _title_similarity_score(track_title: str, video_title: str) -> float:
     """
     Score (0-45) based on how closely the video title matches the track
     title: exact/near-exact match scores highest, falling back to token
     overlap for partial matches.
     """
-    norm_spotify = normalize_text(spotify_title)
+    norm_track = normalize_text(track_title)
     norm_video = normalize_text(video_title)
 
-    if not norm_spotify or not norm_video:
+    if not norm_track or not norm_video:
         return 0.0
 
-    if norm_spotify == norm_video:
+    if norm_track == norm_video:
         return 45.0
 
-    if norm_spotify in norm_video:
+    if norm_track in norm_video:
         # The full track title appears verbatim inside the video title -
         # very likely a correct match even with extra wording around it.
         return 40.0
 
-    spotify_tokens = tokenize(spotify_title)
+    track_tokens = tokenize(track_title)
     video_tokens = tokenize(video_title)
-    overlap = _token_overlap_ratio(spotify_tokens, video_tokens)
+    overlap = _token_overlap_ratio(track_tokens, video_tokens)
     return overlap * 35.0
 
 
@@ -182,15 +182,15 @@ def _negative_signal_penalty(video_title: str) -> float:
 
 
 def score_candidate(
-    spotify_title: str, spotify_artist: str, candidate: YouTubeCandidate
+    track_title: str, track_artist: str, candidate: YouTubeCandidate
 ) -> float:
     """
     Compute a 0-100(ish) match score for one YouTube candidate against the
-    Spotify track's title and artist. Higher is a better match.
+    track's title and artist. Higher is a better match.
     """
     score = 0.0
-    score += _title_similarity_score(spotify_title, candidate.title)
-    score += _artist_signal_score(spotify_artist, candidate.title, candidate.channel_title)
+    score += _title_similarity_score(track_title, candidate.title)
+    score += _artist_signal_score(track_artist, candidate.title, candidate.channel_title)
     score += _wording_bonus(candidate.title)
     score += _channel_bonus(candidate.channel_title)
     score -= _negative_signal_penalty(candidate.title)
@@ -201,8 +201,8 @@ def score_candidate(
 
 
 def find_best_match(
-    spotify_title: str,
-    spotify_artist: str,
+    track_title: str,
+    track_artist: str,
     candidates: list[YouTubeCandidate],
 ) -> Optional[MatchResult]:
     """
@@ -216,7 +216,7 @@ def find_best_match(
     best_score = -1.0
 
     for candidate in candidates:
-        score = score_candidate(spotify_title, spotify_artist, candidate)
+        score = score_candidate(track_title, track_artist, candidate)
         if score > best_score:
             best_score = score
             best_candidate = candidate
