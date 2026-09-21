@@ -66,7 +66,7 @@ If SpotAPI's internal schema ever changes, only this file needs updating -
 the rest of the app depends solely on the ``NormalizedTrack`` structure
 returned by ``search_track``.
 """
-
+"""
 from __future__ import annotations
 
 import logging
@@ -308,3 +308,4 @@ def search_track(query: str, *, limit: int = 5) -> NormalizedTrack:
             return normalized
 
     raise SpotifySearchError(f"No Spotify track found for {query!r}", not_found=True)
+"""
