@@ -8,8 +8,11 @@ Mangum/WSGI adapter is needed.
 
 Request flow for GET /api/search?q=<query>:
 
-    request -> SpotAPI search -> Spotify metadata -> YouTube search
-             -> matching algorithm -> extract_audio(video_id) -> JSON response
+    request -> ytmusicapi song search -> track metadata
+             -> ytmusicapi video search -> matching algorithm
+             -> extract_audio(video_id) -> JSON response
+
+No API keys or credentials are needed anywhere in this flow.
 """
 
 from __future__ import annotations
@@ -28,8 +31,12 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.extractor import extract_audio  # noqa: E402
 from services.matcher import find_best_match  # noqa: E402
-from services.spotify import SpotifySearchError, search_track  # noqa: E402
-from services.youtube import YouTubeSearchError, search_videos  # noqa: E402
+from services.youtube import (  # noqa: E402
+    YouTubeSearchError,
+    candidate_from_track,
+    search_videos,
+)
+from services.ytmusic import TrackSearchError, search_track  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("music_api")
@@ -37,10 +44,10 @@ logger = logging.getLogger("music_api")
 app = FastAPI(
     title="Music Search API",
     description=(
-        "Searches Spotify (via SpotAPI, no credentials required) and finds "
-        "the best matching YouTube video for a given music query."
+        "Searches YouTube Music (via ytmusicapi, no credentials required) and "
+        "finds the best matching YouTube video for a given music query."
     ),
-    version="1.0.0",
+    version="2.0.0",
 )
 
 # CORS is wide open initially so any frontend can call this API during
@@ -72,22 +79,22 @@ async def search(q: str = Query(default="", description="Music search query")):
             content={"success": False, "error": "Search query is required"},
         )
 
-    # Step 1: Search Spotify via SpotAPI (no credentials required).
+    # Step 1: Look the track up on YouTube Music (no credentials required).
     try:
-        track = search_track(query)
-    except SpotifySearchError as exc:
+        track = await search_track(query)
+    except TrackSearchError as exc:
         if exc.not_found:
             return JSONResponse(
                 status_code=404,
                 content={"success": False, "error": "Track not found"},
             )
-        logger.warning("Spotify search failed for query %r: %s", query, exc)
+        logger.warning("Track search failed for query %r: %s", query, exc)
         return JSONResponse(
             status_code=502,
-            content={"success": False, "error": "Failed to search Spotify"},
+            content={"success": False, "error": "Failed to search YouTube Music"},
         )
     except Exception:  # noqa: BLE001 - never leak internals to the client
-        logger.exception("Unexpected error during Spotify search for query %r", query)
+        logger.exception("Unexpected error during track search for query %r", query)
         return JSONResponse(
             status_code=500,
             content={"success": False, "error": "Internal server error"},
@@ -95,17 +102,11 @@ async def search(q: str = Query(default="", description="Music search query")):
 
     track_dict = track.to_dict()
 
-    # Step 2: Search YouTube using the Spotify title + artist.
+    # Step 2: Search YouTube using the track title + artist.
     youtube_query = f"{track.title} {track.artist}".strip()
     try:
         candidates = await search_videos(youtube_query)
     except YouTubeSearchError as exc:
-        if exc.is_config_error:
-            logger.error("YouTube search misconfigured: %s", exc)
-            return JSONResponse(
-                status_code=500,
-                content={"success": False, "error": "Internal server error"},
-            )
         logger.warning("YouTube search failed for query %r: %s", youtube_query, exc)
         return JSONResponse(
             status_code=502,
@@ -120,15 +121,12 @@ async def search(q: str = Query(default="", description="Music search query")):
             content={"success": False, "error": "Internal server error"},
         )
 
-    if not candidates:
-        # Spotify metadata is still useful even with no YouTube match.
-        return {
-            "success": True,
-            "query": query,
-            "track": track_dict,
-            "youtube": None,
-            "stream": None,
-        }
+    # The track's own official audio upload is always a valid candidate, so
+    # a response with track metadata but no video is no longer possible
+    # unless the matcher itself finds nothing.
+    own_upload = candidate_from_track(track)
+    if not any(c.video_id == own_upload.video_id for c in candidates):
+        candidates.append(own_upload)
 
     # Step 3: Run the matching algorithm to pick the best candidate.
     try:
